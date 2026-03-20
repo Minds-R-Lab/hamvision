@@ -1,0 +1,49 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+*.egg
+
+# PyTorch
+*.pth
+*.pt
+*.ckpt
+
+# Data
+data/
+*.npz
+*.nii
+*.nii.gz
+
+# Outputs
+outputs/
+outputs_hamcls/
+vis_output/
+
+# Logs
+*.log
+*.json
+!requirements.txt
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# LaTeX build
+paper/*.aux
+paper/*.bbl
+paper/*.blg
+paper/*.log
+paper/*.out
+paper/*.pdf
+paper/*.synctex.gz
+paper/*.fls
+paper/*.fdb_latexmk
