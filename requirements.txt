@@ -1,8 +1,19 @@
+# Core deep-learning stack
 torch>=2.0.0
 torchvision>=0.15.0
 numpy>=1.21.0
 Pillow>=9.0.0
 tqdm>=4.60.0
+
+# Metrics, plotting, IO
 matplotlib>=3.5.0
 scikit-learn>=1.0.0
+scipy>=1.9.0
+
+# Datasets
 medmnist>=3.0.0
+nibabel>=4.0.0       # ACDC NIfTI volumes
+pandas>=1.4.0        # ISIC metadata, MMOTU splits
+
+# FLOPs measurement (src/measure_flops.py)
+fvcore>=0.1.5

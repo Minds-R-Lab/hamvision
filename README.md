@@ -1,336 +1,253 @@
-# HamVision: Hamiltonian Dynamics as Inductive Bias for Medical Image Analysis
+# HamVision
 
-[![Paper](https://img.shields.io/badge/Paper-PDF-red)](paper/hamvision_paper.tex)
-[![Python 3.8+](https://img.shields.io/badge/Python-3.8%2B-blue.svg)](https://www.python.org/)
-[![PyTorch 2.0+](https://img.shields.io/badge/PyTorch-2.0%2B-orange.svg)](https://pytorch.org/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+**Hamiltonian Dynamics as Inductive Bias for Medical Image Analysis.**
 
-> **Hamiltonian Dynamics as Inductive Bias for Medical Image Analysis**
->
-> Mohamed Mabrok — Department of Mathematics and Statistics, Qatar University
+HamVision is a single backbone with two task-specific heads. A shared
+convolutional encoder feeds a *Hamiltonian bottleneck* whose state is governed
+by a damped harmonic oscillator and produces three structured outputs:
 
-A unified framework for medical image **segmentation** and **classification** that uses the damped harmonic oscillator as a structured inductive bias. The oscillator's phase-space decomposition produces three functionally distinct representations — position (features), momentum (boundary/texture gradients), and energy (spatial saliency) — that are exploited by task-specific heads without modifying the oscillator itself.
+- **position** *q* &mdash; feature embedding,
+- **momentum** *p* &mdash; first-derivative-like spatial signal,
+- **energy** *H* = ½(‖*q*‖² + ‖*p*‖²) &mdash; saliency.
 
-<p align="center">
-  <img src="figs/hamseg_architecture.png" width="48%" alt="HamSeg Architecture"/>
-  <img src="figs/hamcls_architecture.png" width="48%" alt="HamCls Architecture"/>
-</p>
-<p align="center"><em>Left: HamSeg (segmentation). Right: HamCls (classification). Both share the same encoder and Hamiltonian bottleneck.</em></p>
+The same bottleneck drives **HamSeg** (a U-Net-style decoder for medical image
+segmentation) and **HamCls** (a Phase-Space Spectral Pooling head for medical
+image classification). The classification head consumes the bottleneck's
+complex signal *z = q + i p* in the frequency domain instead of pooling
+spatially.
 
----
-
-## Key Idea
-
-The damped harmonic oscillator is a universal signal analyzer. When driven by spatially varying features, it produces:
-
-- **Position** $q$: filtered feature content (what is present at each location)
-- **Momentum** $p$: spatial gradients (large at boundaries, small in homogeneous regions)
-- **Energy** $\mathcal{H} = \frac{1}{2}(q^2 + p^2)$: a parameter-free saliency map
-
-These representations emerge from the physics — not from supervision. A bank of oscillators at different learned frequencies forms a neural filterbank, and the same bottleneck serves both segmentation and classification.
-
-The core recurrence:
-
-$$z_t = \underbrace{e^{-\nu_t \Delta_t}}_{\text{decay}} \cdot \underbrace{e^{i\omega \Delta_t}}_{\text{rotation}} \cdot z_{t-1} + u_t$$
-
-where $z = q + ip$ is the complex phase-space state, $\nu_t$ is input-dependent damping, and $\omega = \sqrt{k}$ is the learned natural frequency.
+This repository contains the reference implementation, ablation harness,
+multi-seed orchestrator, evaluation pipeline, and the visualization scripts
+used to produce the paper figures.
 
 ---
 
-## Results
+## Repository layout
 
-### Segmentation
-
-| Dataset | Modality | HamSeg | Best Baseline | Δ | Params |
-|---------|----------|--------|---------------|---|--------|
-| ISIC 2018 | Dermoscopy | **89.38** | 89.19 (FreqConvMamba) | +0.19 | 8.57M |
-| ISIC 2017 | Dermoscopy | **88.40** | 88.37 (FreqConvMamba) | +0.03 | 8.57M |
-| TN3K | Thyroid US | **87.05** | 86.85 (FreqConvMamba) | +0.20 | 8.57M |
-| ACDC | Cardiac MRI | **92.40** | 89.79 (FreqConvMamba) | +2.61 | 8.57M |
-
-### Classification (MedMNIST 224×224)
-
-| Dataset | Modality | HamCls ACC | HamCls AUC | Best Baseline ACC |
-|---------|----------|------------|------------|-------------------|
-| BloodMNIST | Microscopy | **98.85** | **99.93** | 96.7 (MedMamba-X) |
-| DermaMNIST | Dermoscopy | **77.96** | **93.66** | 78.0 (MedViT-S) |
-| BreastMNIST | Breast US | 89.10 | 89.14 | 89.7 (MedViT-S) |
+```
+hamvision/
+├── README.md
+├── LICENSE
+├── requirements.txt
+│
+├── src/                                 Core models, training, evaluation
+│   ├── hamseg.py                        HamSeg training script (segmentation)
+│   ├── hamcls.py                        HamCls training script (classification, PSSP head)
+│   ├── hamcls_utils.py                  Shared building blocks for hamcls.py (datasets, transforms, ConvNeXt, scan line)
+│   ├── ablate_classifier.py             Head/bottleneck ablation harness for HamCls
+│   ├── inference_tta.py                 Test-time augmentation + ensemble + threshold tuning
+│   ├── eval_perclass_metrics.py         Per-class precision / recall / F1
+│   ├── measure_flops.py                 FLOPs + parameter count (fvcore)
+│   ├── analyze_pssp_complementarity.py  Canonical-correlation analysis of PSSP feature paths
+│   ├── diagnose_hamseg.py               Layer-wise diagnostics for the segmentation network
+│   └── shrink_checkpoint.py             Strip optimizer / EMA state for distribution
+│
+├── data/                                Dataset preparation
+│   ├── prepare_data.py                  Universal downloader (ISIC, TN3K, MedMNIST, ...)
+│   ├── preprocess_acdc.py               ACDC NIfTI → 2D slices
+│   └── preprocess_mmotu.py              MMOTU official-split builder
+│
+├── experiments/                         Orchestration & aggregation
+│   ├── run_multi_seed.py                3-seed orchestrator with per-dataset presets
+│   ├── aggregate_results.py             Cross-seed mean ± std for the main tables
+│   ├── aggregate_ablation.py            Cross-seed mean ± std for ablation runs
+│   ├── find_reported_checkpoints.py     Map paper numbers back to their checkpoints
+│   ├── migrate_checkpoints.py           Move legacy checkpoints into the seeded layout
+│   ├── collect_results.py               Tarball the small JSON / log files for transport
+│   └── smoke_test_ablation.py           3-epoch smoke test for every ablation variant
+│
+├── visualize/                           Figure generators
+│   ├── generate_block_diagram.py        Fig. 1 — Hamiltonian bottleneck block diagram
+│   ├── visualize_segmentation.py        Fig. 4 — qualitative segmentation panel
+│   ├── visualize_energy_gates.py        Fig. 5 — multi-scale energy gates
+│   ├── visualize_classification_interpretability.py
+│   │                                    Fig. 7 — classification interpretability
+│   └── visualize_hamseg_legacy.py       Older single-sample diagnostic plot
+│
+└── figures/                             Paper figures (PDF / PNG)
+    ├── fig1_block_diagram.pdf
+    ├── fig2_hamseg_architecture.pdf
+    ├── fig3_hamcls_architecture.pdf
+    ├── fig4_qualitative_segmentation.png
+    ├── fig5_multiscale_energy_gates.png
+    ├── fig6_segmentation_interpretability.png
+    └── fig7_classification_interpretability.png
+```
 
 ---
 
 ## Installation
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/hamvision.git
+git clone https://github.com/<your-org>/hamvision.git
 cd hamvision
+python -m venv .venv && source .venv/bin/activate   # optional but recommended
 pip install -r requirements.txt
 ```
 
-### Dependencies
-
-- Python ≥ 3.8
-- PyTorch ≥ 2.0
-- torchvision
-- numpy, Pillow, tqdm, matplotlib
-- scikit-learn (for classification metrics: AUC, F1)
-- medmnist (for classification datasets, optional)
+PyTorch with CUDA support should be installed first (follow the official
+PyTorch instructions for your CUDA / OS combination). All other dependencies
+are pinned in `requirements.txt`.
 
 ---
 
-## Repository Structure
+## Datasets
 
+Fourteen benchmarks across nine imaging modalities are supported.
+
+**Segmentation (5):** ISIC 2017, ISIC 2018, TN3K, ACDC, MMOTU.
+**Classification (9):** PathMNIST, DermaMNIST, BloodMNIST, OCTMNIST,
+OrganAMNIST, OrganCMNIST, PneumoniaMNIST, RetinaMNIST, BreastMNIST.
+
+All preparation is handled by `data/prepare_data.py`:
+
+```bash
+# Segmentation
+python data/prepare_data.py --dataset isic2018 --out_dir ./data_root/ISIC2018
+python data/prepare_data.py --dataset acdc     --out_dir ./data_root/ACDC
+python data/prepare_data.py --dataset tn3k     --out_dir ./data_root/TN3K
+
+# Classification (MedMNIST datasets stream via the medmnist package)
+python data/prepare_data.py --dataset dermamnist --out_dir ./data_root/MedMNIST
 ```
-hamvision/
-├── hamseg.py              # Segmentation pipeline (training + evaluation)
-├── hamcls.py              # Classification pipeline (training + evaluation)
-├── diagnose_hamseg.py     # Signal diagnostics (gate, momentum, energy analysis)
-├── visualize_hamseg.py    # Interpretability visualizations (5 figure types)
-├── preprocess_acdc.py     # ACDC NIfTI → npz preprocessor
-├── requirements.txt       # Python dependencies
-├── LICENSE                # MIT License
-├── figs/                  # Architecture diagrams
-│   ├── hamseg_architecture.png
-│   └── hamcls_architecture.png
-└── paper/                 # LaTeX source
-    ├── hamvision_paper.tex
-    ├── references.bib
-    └── figs/
-```
+
+ACDC and MMOTU have dataset-specific preprocessors (`preprocess_acdc.py`,
+`preprocess_mmotu.py`) that `prepare_data.py` calls under the hood.
 
 ---
 
-## Usage
+## Training
 
-### Segmentation (HamSeg)
+### Single seed (drop-in replacement for the training scripts)
 
-**ISIC 2018** (dermoscopy, binary):
 ```bash
-python hamseg.py --dataset isic2018 --data_root ./data/ISIC2018
+# Segmentation — ISIC 2018, seed 42
+python src/hamseg.py --dataset isic2018 --data_root ./data_root/ISIC2018 \
+                     --seed 42 --epochs 200 --batch_size 8 --lr 5e-4 \
+                     --output_dir ./outputs/isic2018
+
+# Classification — DermaMNIST, seed 42
+python src/hamcls.py --dataset dermamnist --seed 42 \
+                     --epochs 100 --batch_size 32 --lr 1e-3 \
+                     --output_dir ./outputs/dermamnist
 ```
 
-**ISIC 2017** (dermoscopy, binary):
+### Three seeds (recommended; matches the paper)
+
 ```bash
-python hamseg.py --dataset isic2017 --data_root ./data/ISIC2017
+# Single dataset, three seeds, in series:
+python experiments/run_multi_seed.py seg --dataset isic2018 \
+                                         --data_root ./data_root/ISIC2018 \
+                                         --seeds 42 43 44
+
+# Full segmentation suite (5 datasets × 3 seeds):
+python experiments/run_multi_seed.py seg --preset all_seg --seeds 42 43 44 \
+                                         --data_root_map seg_paths.json
+
+# Full classification suite (9 datasets × 3 seeds):
+python experiments/run_multi_seed.py cls --preset all_cls --seeds 42 43 44
 ```
 
-**TN3K** (thyroid ultrasound, binary):
+`run_multi_seed.py` writes a master `INDEX.json` after every seed completes so
+the experiment record is durable across crashes. Use `--resume` to skip seeds
+that already wrote `test_results_final.json`.
+
+### Aggregation
+
 ```bash
-python hamseg.py --dataset tn3k --data_root ./data/TN3K --val_ratio 0.1
-```
-
-**ACDC** (cardiac MRI, 4-class — requires preprocessing):
-```bash
-# Step 1: Preprocess NIfTI to npz
-python preprocess_acdc.py --acdc_root ./data/ACDC/database --output_dir ./data/ACDC_npz
-
-# Step 2: Train
-python hamseg.py --dataset acdc --data_root ./data/ACDC_npz --num_classes 4
-```
-
-**Key segmentation arguments:**
-```
---dataset         Dataset name: isic2018, isic2017, tn3k, acdc
---data_root       Path to dataset folder
---num_classes     1 (binary) or N (multi-class, e.g., 4 for ACDC)
---embed_dim       Base channel width (default: 48)
---epochs          Training epochs (default: 200)
---lr              Learning rate (default: 5e-4)
---batch_size      Batch size (default: 8)
---patience        Early stopping patience (default: 80)
---val_ratio       Validation split ratio (default: 0)
---test_every      Run test evaluation every N epochs (default: 30)
-```
-
-**Expected data layout** (ISIC-style):
-```
-data/ISIC2018/
-├── train/
-│   ├── images/
-│   └── masks/
-└── test/
-    ├── images/
-    └── masks/
-```
-
-### Classification (HamCls)
-
-**MedMNIST datasets** (auto-downloads via medmnist package):
-```bash
-mkdir -p ./data
-
-# Blood cell microscopy (8 classes, 17K images)
-python hamcls.py --dataset bloodmnist --size 224 --epochs 100 --batch_size 64
-
-# Dermoscopy (7 classes, 10K images)
-python hamcls.py --dataset dermamnist --size 224 --epochs 100 --batch_size 32
-
-# Breast ultrasound (2 classes, 780 images — use balanced loss)
-python hamcls.py --dataset breastmnist --size 224 --epochs 200 --batch_size 8 \
-    --lr 3e-4 --weight_decay 0.01 --drop_rate 0.3 --head_drop 0.4 --balanced
-
-# Colon pathology (9 classes, 107K images)
-python hamcls.py --dataset pathmnist --size 224 --epochs 100 --batch_size 64
-
-# Abdominal CT (11 classes, 58K images)
-python hamcls.py --dataset organamnist --size 224 --epochs 100 --batch_size 64
-
-# Retinal fundus (5 classes, 1.6K images)
-python hamcls.py --dataset retinamnist --size 224 --epochs 150 --batch_size 32 --balanced
-
-# Retinal OCT (4 classes, 109K images)
-python hamcls.py --dataset octmnist --size 224 --epochs 100 --batch_size 64
-
-# Chest X-ray (2 classes, 5.8K images)
-python hamcls.py --dataset pneumoniamnist --size 224 --epochs 100 --batch_size 32
-```
-
-**Key classification arguments:**
-```
---dataset         MedMNIST dataset name (e.g., bloodmnist, dermamnist)
---data_root       Path to data directory (default: ./data)
---size            Image resolution: 28, 64, 128, 224 (default: 224)
---epochs          Training epochs (default: 100)
---lr              Learning rate (default: 1e-3)
---batch_size      Batch size (default: 64)
---balanced        Use inverse-frequency class weights (for imbalanced datasets)
---test_every      Periodic test interval in epochs (default: 30)
---resume          Resume from last checkpoint
---test_only       Skip training, run test only
-```
-
-**Resuming training** (e.g., extend from 100 to 150 epochs):
-```bash
-python hamcls.py --dataset dermamnist --size 224 --epochs 150 --batch_size 32 --resume
-```
-
-### Diagnostics and Visualization
-
-**Signal diagnostics** (measures gate usage, momentum by region, energy ratios):
-```bash
-python diagnose_hamseg.py --dataset isic2018 --data_root ./data/ISIC2018 \
-    --checkpoint ./outputs/isic2018/best_model.pth
-```
-
-**Interpretability visualizations** (generates 5 figure types):
-```bash
-python visualize_hamseg.py --dataset isic2018 --data_root ./data/ISIC2018 \
-    --checkpoint ./outputs/isic2018/best_model.pth --output_dir ./vis_output
-```
-
-Generated figures:
-1. **Physics signals**: Energy map, momentum field, momentum overlay with GT
-2. **Skip gate maps**: Energy-gated skip connections at all 3 decoder levels
-3. **Segmentation results**: Predictions vs. ground truth with contour overlay
-4. **Training curves**: Loss, Dice, learning rate over epochs
-5. **Multi-scale comparison**: Side-by-side gate activations at d₃, d₂, d₁
-
----
-
-## Architecture
-
-### Shared Components (both tasks)
-
-| Component | Details |
-|-----------|---------|
-| Stem | 3×3 Conv × 2, C=48 |
-| Encoder | 3 stages of ConvNeXt blocks (C → 2C → 4C → 8C) |
-| Bottleneck | ConvNeXt ‖ Oscillator Bank → Gated Fusion + Dropout |
-
-### HamSeg (Segmentation) — 8.57M params
-
-The decoder uses energy-gated skip connections (energy map modulates encoder features via centered sigmoid) and momentum injection (projected momentum concatenated at every decoder level) plus phase-space attention at the coarsest decoder level.
-
-### HamCls (Classification) — 7.3M params
-
-Phase-space pooling aggregates the three oscillator outputs:
-- Features → GAP → 384-d (content)
-- Momentum → GAP → 384-d (texture/boundary complexity)
-- Energy → GAP + MLP → 16-d (saliency statistics)
-- Concatenate (784-d) → LayerNorm → MLP → class logits
-
----
-
-## Output Structure
-
-Each training run creates a self-contained output folder:
-
-```
-outputs/isic2018/                   # Segmentation
-├── best_model.pth                  # Best model weights
-├── last_checkpoint.pth             # Full checkpoint (optimizer, scheduler)
-├── report.txt                      # Comprehensive results report
-├── test_results_final.json         # Final test metrics
-├── test_results_epoch030.json      # Periodic test at epoch 30
-├── test_results_epoch060.json      # Periodic test at epoch 60
-├── training_curves.png             # Loss/Dice/LR plots
-└── train.log                       # Full training log
-
-outputs_hamcls/bloodmnist/          # Classification
-├── best_model.pth
-├── last_checkpoint.pth
-├── report.txt                      # ACC, AUC, F1, per-class breakdown
-├── test_results_final.json
-├── test_results_epoch030.json
-├── training_curves.png
-├── history.json                    # Full training history
-└── train.log
+python experiments/aggregate_results.py --root outputs/dermamnist
+# -> writes aggregate.json (mean ± std across seeds) and SUMMARY.txt
 ```
 
 ---
 
-## Metrics
+## Test-time augmentation, ensemble, threshold tuning
 
-### Segmentation
-- **DSC** (Dice Similarity Coefficient)
-- **mIoU** (mean Intersection over Union)
-- **Precision**, **Specificity**, **Accuracy**
+`src/inference_tta.py` runs flip-based TTA, ensembles seeds 42/43/44, and
+tunes the binary threshold against the validation set. Matches the
+"deployment-mode" rows of the segmentation tables.
 
-### Classification
-- **ACC** (Top-1 Accuracy)
-- **AUC** (macro, one-vs-rest)
-- **F1** (macro and weighted)
-- Per-class accuracy and F1
-- Confusion matrix
-- Full sklearn classification report
-
----
-
-## Interpretability
-
-The Hamiltonian formulation provides built-in interpretability without post-hoc methods:
-
-| Signal | Physical Meaning | Segmentation Use | Classification Use |
-|--------|-----------------|------------------|-------------------|
-| Position $q$ | Filtered features | Decoder input | Content pooling |
-| Momentum $p$ | Spatial gradients | Boundary injection | Texture complexity |
-| Energy $\mathcal{H}$ | Saliency map | Skip gate modulation | Excitation statistics |
-
-Diagnostic analysis confirms:
-- **Gate usage**: Oscillator contributes ~80% in block 0, ~59% in block 1
-- **Momentum gradient**: Interior (110.2) > Boundary (95.1) > Exterior (83.2)
-- **Energy ratio**: Boundary/Exterior = 1.25×
-- **Skip gates**: Full dynamic range [0.19, 0.75] at all decoder levels
-
----
-
-## Citation
-
-```bibtex
-@article{mabrok2026hamvision,
-  title   = {Hamiltonian Dynamics as Inductive Bias for Medical Image Analysis},
-  author  = {Mabrok, Mohamed},
-  journal = {arXiv preprint},
-  year    = {2026}
-}
+```bash
+python src/inference_tta.py --dataset isic2018 \
+                            --data_root  ./data_root/ISIC2018 \
+                            --output_root ./outputs \
+                            --tta --ensemble --tune_threshold
 ```
 
-## Related Work
+---
 
-- **SymMamba**: Hamiltonian oscillator dynamics for language modeling ([paper](https://arxiv.org/abs/XXXX))
-- **Mamba-3**: Complex-valued SSMs with exponential-trapezoidal discretization ([paper](https://arxiv.org/abs/2603.15569))
+## Ablations
+
+```bash
+# Classifier component ablations (e.g. --no_pssp_complex)
+python experiments/smoke_test_ablation.py     # 3-epoch sanity check first
+
+python src/ablate_classifier.py --variant full      --dataset dermamnist --seed 42
+python src/ablate_classifier.py --variant no_ss2d   --dataset dermamnist --seed 42
+python src/ablate_classifier.py --variant gap_head  --dataset dermamnist --seed 42
+
+# Drop the complex-FFT branch of PSSP
+python src/hamcls.py --dataset dermamnist --no_pssp_complex --seed 42
+
+# Aggregate
+python experiments/aggregate_ablation.py --root outputs_ablation
+```
+
+`analyze_pssp_complementarity.py` computes the canonical-correlation analysis
+across the four PSSP feature paths used in the paper.
+
+---
+
+## FLOPs and parameter count
+
+```bash
+python src/measure_flops.py --out outputs/flops_summary.json
+```
+
+Reports both raw and autocast-patched counts (the patch makes `fvcore`'s tracer
+see through the fp32 oscillator scan). HamCls comes out at **2.95 M params /
+1.71 GFLOPs** at 224 × 224, HamSeg at **8.57 M params / 27.94 GFLOPs** at
+256 × 256.
+
+---
+
+## Reproducing the figures
+
+```bash
+python visualize/generate_block_diagram.py  --out figures/fig1_block_diagram
+
+python visualize/visualize_segmentation.py  --ckpt_root ./outputs \
+                                            --save_dir  ./figures
+
+python visualize/visualize_energy_gates.py  --ckpt_root ./outputs \
+                                            --save_dir  ./figures
+
+python visualize/visualize_classification_interpretability.py \
+                                            --ckpt_root ./outputs \
+                                            --save_dir  ./figures
+```
+
+---
+
+## Headline numbers
+
+- **5/5** segmentation leads on Dice (ACDC, ISIC 2018, ISIC 2017, TN3K,
+  MMOTU) at 3-seed precision.
+- **8/9** MedMNIST classification leads or ties at 3-seed precision.
+- **4× smaller and 7× cheaper** than MedKAFormer-T at 224 × 224.
+- **Single shared encoder + bottleneck** drives both heads &mdash; the
+  Hamiltonian apparatus contributes between **+1.17 pp Dice** (ACDC) and
+  **+2.99 pp Dice** (ISIC 2018) over a ConvNeXt-only stripped variant.
+
+---
+
+## Citing
+
+If you use this repository, please cite the paper. A BibTeX entry will be
+added here once the manuscript is accepted.
 
 ---
 
 ## License
 
-This project is released under the [MIT License](LICENSE).
+Released under the MIT License (see `LICENSE`).

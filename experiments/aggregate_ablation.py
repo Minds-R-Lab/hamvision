@@ -1,0 +1,197 @@
+#!/usr/bin/env python3
+"""
+aggregate_classification_ablation.py — collect ablation results into a
+single summary table.
+
+Reads per-seed test_results_final.json (or ablation_summary.json for the
+architectural variants) under:
+
+    outputs_ablation_cls/{variant}/{dataset}/seed_{N}/test_results_final.json
+    outputs_ablation_cls_components/{variant}/{dataset}/seed_{N}/test_results_final.json
+
+Produces:
+  * stdout — pretty table with mean ± std for ACC / AUC / F1
+  * outputs_ablation_cls/ablation_summary.json — machine-readable
+  * outputs_ablation_cls/ablation_table.tex   — LaTeX snippet ready to paste
+
+USAGE
+-----
+  python aggregate_classification_ablation.py \\
+      --arch_dir outputs_ablation_cls \\
+      --comp_dir outputs_ablation_cls_components \\
+      --dataset dermamnist
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+from pathlib import Path
+
+import numpy as np
+
+
+VARIANT_ORDER = [
+    'full',
+    'no_ss2d',
+    'gap_head',
+    'pssa_head',
+    'no_complex',
+    'no_cross',
+    'no_ss2d_energy',
+    'n_dirs_1',
+]
+VARIANT_LABEL = {
+    'full': 'Full HamCls',
+    'no_ss2d': r'$-$ SS2D (ConvNeXt only)',
+    'gap_head': r'$-$ PSSP $\to$ GAP head',
+    'pssa_head': r'$-$ PSSP $\to$ PSSA head',
+    'no_complex': r'$-$ complex FFT (mag only)',
+    'no_cross': r'$-$ cross features',
+    'no_ss2d_energy': r'$-$ SS2D-energy attn',
+    'n_dirs_1': r'$-$ bidirectional scan',
+}
+
+
+def collect_seeds(variant_dir: Path, dataset: str):
+    """Return list of dicts (one per seed) for a given variant/dataset."""
+    base = variant_dir / dataset
+    if not base.exists():
+        return []
+    rows = []
+    for seed_dir in sorted(base.glob('seed_*')):
+        # Prefer the canonical test_results_final.json; fall back to ablation_summary.
+        for fname in ('test_results_final.json', 'ablation_summary.json'):
+            fpath = seed_dir / fname
+            if fpath.exists():
+                with open(fpath) as f:
+                    rows.append(json.load(f))
+                break
+    return rows
+
+
+def mean_std(values):
+    arr = np.array(values, dtype=float)
+    return float(arr.mean()), float(arr.std(ddof=1)) if len(arr) > 1 else 0.0
+
+
+def main():
+    p = argparse.ArgumentParser()
+    p.add_argument('--arch_dir', type=str, default='outputs_ablation_cls')
+    p.add_argument('--comp_dir', type=str, default='outputs_ablation_cls_components')
+    p.add_argument('--dataset', type=str, default='dermamnist')
+    p.add_argument('--out_json', type=str, default=None)
+    p.add_argument('--out_tex', type=str, default=None)
+    args = p.parse_args()
+
+    arch_dir = Path(args.arch_dir)
+    comp_dir = Path(args.comp_dir)
+
+    summary = {}
+    for v in VARIANT_ORDER:
+        if v in {'full', 'no_ss2d', 'gap_head', 'pssa_head'}:
+            seeds = collect_seeds(arch_dir / v, args.dataset)
+        else:
+            seeds = collect_seeds(comp_dir / v, args.dataset)
+        if not seeds:
+            summary[v] = None
+            continue
+        accs = [r['accuracy'] * 100 for r in seeds]
+        aucs = [r['auc'] * 100 for r in seeds]
+        f1s = [r['f1_macro'] * 100 for r in seeds]
+        params = seeds[0].get('params')  # parameter count (constant across seeds)
+        summary[v] = {
+            'n_seeds': len(seeds),
+            'acc_mean': mean_std(accs)[0], 'acc_std': mean_std(accs)[1],
+            'auc_mean': mean_std(aucs)[0], 'auc_std': mean_std(aucs)[1],
+            'f1_mean':  mean_std(f1s)[0],  'f1_std':  mean_std(f1s)[1],
+            'params': params,
+        }
+
+    # ----- pretty stdout -----
+    print(f'\nClassification ablation — {args.dataset}')
+    print('=' * 78)
+    print(f'{"variant":<28} {"params":>10} {"AUC":>14} {"ACC":>14} {"F1":>14}')
+    print('-' * 78)
+    for v in VARIANT_ORDER:
+        s = summary[v]
+        if s is None:
+            print(f'{VARIANT_LABEL[v][:28]:<28} {"--":>10} {"missing":>14}')
+            continue
+        params_str = f'{s["params"]/1e6:.2f}M' if s['params'] else '?'
+        auc_s = f'{s["auc_mean"]:.2f}±{s["auc_std"]:.2f}'
+        acc_s = f'{s["acc_mean"]:.2f}±{s["acc_std"]:.2f}'
+        f1_s  = f'{s["f1_mean"]:.2f}±{s["f1_std"]:.2f}'
+        # Strip TeX from labels for the stdout view
+        label = VARIANT_LABEL[v].replace(r'$-$', '-').replace('$\\to$', '->')
+        print(f'{label[:28]:<28} {params_str:>10} {auc_s:>14} {acc_s:>14} {f1_s:>14}')
+    print('=' * 78)
+
+    # ----- JSON -----
+    out_json = args.out_json or os.path.join(args.arch_dir, 'ablation_summary.json')
+    os.makedirs(os.path.dirname(out_json) or '.', exist_ok=True)
+    with open(out_json, 'w') as f:
+        json.dump({
+            'dataset': args.dataset,
+            'results': summary,
+        }, f, indent=2)
+    print(f'\nJSON  -> {out_json}')
+
+    # ----- LaTeX -----
+    out_tex = args.out_tex or os.path.join(args.arch_dir, 'ablation_table.tex')
+    full = summary.get('full')
+    lines = []
+    lines.append(r'% Auto-generated by aggregate_classification_ablation.py')
+    lines.append(r'\begin{table}[t]')
+    lines.append(r'\centering')
+    lines.append(r'\caption{\textbf{Classification ablation on ' + args.dataset.upper() +
+                 r'.} Mean $\pm$ std over 3 seeds (42, 43, 44). Each variant strips one '
+                 r'component from the full classifier architecture and is otherwise trained '
+                 r'with identical hyperparameters and schedule. ``$-$ X'' means the row removes '
+                 r'component X. The full-row $\Delta$ shows the gap; bigger gaps $=$ component '
+                 r'is more load-bearing.}')
+    lines.append(r'\label{tab:cls_ablation}')
+    lines.append(r'\footnotesize')
+    lines.append(r'\setlength{\tabcolsep}{4pt}')
+    lines.append(r'\begin{tabular}{@{}lcccc@{}}')
+    lines.append(r'\toprule')
+    lines.append(r'Variant & Params & AUC$\uparrow$ & ACC$\uparrow$ & F1-macro$\uparrow$ \\')
+    lines.append(r'\midrule')
+
+    def fmt(s, key, ref=None):
+        v = s[f'{key}_mean']
+        std = s[f'{key}_std']
+        if ref is not None and ref is not s:
+            delta = v - ref[f'{key}_mean']
+            sign = '+' if delta >= 0 else ''
+            tail = f' ({sign}{delta:.2f})'
+        else:
+            tail = ''
+        return f'{v:.2f}$_{{\\pm {std:.2f}}}${tail}'
+
+    for v in VARIANT_ORDER:
+        s = summary[v]
+        if s is None:
+            continue
+        params_str = f'{s["params"]/1e6:.2f}M' if s['params'] else '--'
+        ref = full if v != 'full' else None
+        if v == 'full':
+            label = r'\textbf{' + VARIANT_LABEL[v] + r'} (baseline)'
+        else:
+            label = VARIANT_LABEL[v]
+        lines.append(
+            f'{label} & {params_str} & '
+            f'{fmt(s, "auc", ref)} & {fmt(s, "acc", ref)} & {fmt(s, "f1", ref)} \\\\'
+        )
+    lines.append(r'\bottomrule')
+    lines.append(r'\end{tabular}')
+    lines.append(r'\end{table}')
+
+    with open(out_tex, 'w') as f:
+        f.write('\n'.join(lines) + '\n')
+    print(f'LaTeX -> {out_tex}')
+
+
+if __name__ == '__main__':
+    main()

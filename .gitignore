@@ -1,51 +1,51 @@
 # Python
 __pycache__/
 *.py[cod]
-*.egg-info/
-dist/
-build/
-*.egg
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ipynb_checkpoints/
 
-# PyTorch
+# Build / packaging
+build/
+dist/
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+
+# Training outputs and checkpoints
+outputs/
+outputs_*/
+checkpoints/
 *.pth
 *.pt
 *.ckpt
+INDEX.json
+*.tar.gz
 
-# Data
-data/
+# Datasets
+data_root/
 *.npz
-*.nii
 *.nii.gz
-
-# Outputs
-outputs/
-outputs_hamcls/
-vis_output/
 
 # Logs
 *.log
-*.json
-!requirements.txt
+logs/
 
-# IDE
+# Editor / OS
 .vscode/
 .idea/
-*.swp
-*.swo
-
-# OS
 .DS_Store
 Thumbs.db
+*.swp
+*~
 
-# LaTeX build
-paper/*.aux
-paper/*.bbl
-paper/*.blg
-paper/*.log
-paper/*.out
-paper/*.pdf
-paper/*.synctex.gz
-paper/*.fls
-paper/*.fdb_latexmk
-paper/*
-paper/
+# Generated figures should usually be regenerated, not committed
+# (the canonical paper figures live in figures/ and are committed)
+visualize/*.png
+visualize/*.pdf
