@@ -86,14 +86,24 @@ def get_args():
     p.add_argument('--no_auto_download', action='store_true',
                    help='If the dataset is missing, do NOT attempt to download it; '
                         'just print setup instructions and exit.')
-    # --- Ablation flag (round-2 revision) ---
-    p.add_argument('--ablation', type=str, default='none', choices=['none', 'A', 'B'],
+    # --- Ablation flag (round-2 revision, extended for round-3) ---
+    p.add_argument('--ablation', type=str, default='none',
+                   choices=['none', 'A', 'B', 'C'],
                    help='Ablation variant of the Hamiltonian Bottleneck. '
                         '"none" = full HamSeg (default). '
                         '"A" = ConvNeXt-only (replaces SS2D oscillator with ConvNeXt blocks; '
                         'energy/momentum disabled in the decoder). '
                         '"B" = Oscillator-only (drops the ConvNeXt path and gate from the '
-                        'bottleneck; decoder unchanged).')
+                        'bottleneck; decoder unchanged). '
+                        '"C" = Bandpass filterbank (round-3 Q1/Q2 baseline; '
+                        'replaces SS2D with a parameter-matched Gabor filterbank).')
+    # --- HamVision-Lite flags (round-3 Q4) ---
+    p.add_argument('--lite_no_se', action='store_true',
+                   help='Drop the SE energy-channel attention in the bottleneck. '
+                        'Component of the HamVision-Lite recipe (round-3 Q4).')
+    p.add_argument('--lite_no_psattn', action='store_true',
+                   help='Drop the phase-space attention at decoder stage d3. '
+                        'Component of the HamVision-Lite recipe (round-3 Q4).')
     a = p.parse_args()
     if a.no_amp: a.use_amp = False
     a.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -516,10 +526,12 @@ class HamiltonianBottleneck(nn.Module):
         The output is the SS2D position projection alone. momentum and
         energy_map remain available, so the decoder is unchanged.
     """
-    def __init__(self, dim, damping_clamp=5.0, drop_rate=0.1, ablation='none'):
+    def __init__(self, dim, damping_clamp=5.0, drop_rate=0.1,
+                 ablation='none', lite_no_se=False):
         super().__init__()
         self.ablation = ablation
         self.dim = dim
+        self.lite_no_se = lite_no_se
 
         if ablation == 'A':
             # ConvNeXt-only: ONE ConvNeXt block per outer HamBN instance, matching
@@ -533,21 +545,32 @@ class HamiltonianBottleneck(nn.Module):
             self.drop = nn.Dropout2d(drop_rate)
             return
 
-        # Variants 'none' and 'B' both use the SS2D oscillator
+        # Variants 'none', 'B', and 'C' all share the (q, p, energy)
+        # triplet interface but differ in how it is produced.
         self.norm = nn.LayerNorm(dim, eps=1e-6)
-        self.ss2d = HamiltonianSS2D(dim, damping_clamp)
+        if ablation == 'C':
+            # Gabor-style bandpass filterbank instead of the Hamiltonian SS2D.
+            # See bandpass_baseline.py for the design rationale (round-3 Q1/Q2).
+            import importlib
+            self.ss2d = importlib.import_module(
+                'bandpass_baseline').BandpassFilterbank(dim)
+        else:
+            self.ss2d = HamiltonianSS2D(dim, damping_clamp)
         self.pos_proj = nn.Conv2d(dim, dim, 1, bias=False)
         # FIX 3: Dropout after fusion — reduces overfitting gap
         self.drop = nn.Dropout2d(drop_rate)
-        # FIX 4: Learned energy channel attention
-        self.energy_attn = nn.Sequential(
-            nn.AdaptiveAvgPool2d(1),       # (B, C, 1, 1)
-            nn.Flatten(),                   # (B, C)
-            nn.Linear(dim, dim // 4),
-            nn.ReLU(),
-            nn.Linear(dim // 4, dim),
-            nn.Sigmoid()
-        )
+        # FIX 4: Learned energy channel attention (skipped for HamVision-Lite)
+        if not lite_no_se:
+            self.energy_attn = nn.Sequential(
+                nn.AdaptiveAvgPool2d(1),       # (B, C, 1, 1)
+                nn.Flatten(),                   # (B, C)
+                nn.Linear(dim, dim // 4),
+                nn.ReLU(),
+                nn.Linear(dim // 4, dim),
+                nn.Sigmoid()
+            )
+        else:
+            self.energy_attn = None  # plain channel-mean will be used
 
         if ablation == 'B':
             # Oscillator-only: no ConvNeXt path, no fusion gate
@@ -569,7 +592,7 @@ class HamiltonianBottleneck(nn.Module):
             # No momentum / energy → decoder will treat skips as plain U-Net.
             return out, None, None
 
-        # Common SS2D forward (used by variants 'none' and 'B').
+        # Common forward path for variants 'none', 'B', 'C'.
         # Note: conv_block must be called UNDER the outer autocast (i.e. NOT
         # inside autocast(enabled=False)) because the encoder hands us x in
         # fp16 and conv_block expects matching dtype. Compute conv_out first,
@@ -577,24 +600,36 @@ class HamiltonianBottleneck(nn.Module):
         if self.ablation != 'B':
             conv_out = self.conv_block(x)
         x_n = self.norm(x.permute(0, 2, 3, 1)).permute(0, 3, 1, 2)
-        with torch.cuda.amp.autocast(enabled=False):
-            pos, mom, energy_raw = self.ss2d(x_n.float())
+
+        # Ablation 'C' (bandpass) is parameter-light and numerically benign,
+        # so we keep it under the surrounding autocast. Ablations 'none' and
+        # 'B' both use the Hamiltonian SS2D and require fp32 for the scan.
+        if self.ablation == 'C':
+            pos, mom, energy_raw = self.ss2d(x_n)
             ham_out = self.pos_proj(pos)
+            g = self.gate(torch.cat([conv_out, ham_out], 1))
+            out = conv_out * g + ham_out * (1 - g)
+        else:
+            with torch.cuda.amp.autocast(enabled=False):
+                pos, mom, energy_raw = self.ss2d(x_n.float())
+                ham_out = self.pos_proj(pos)
 
-            if self.ablation == 'B':
-                # Oscillator-only: output is just the position projection
-                out = ham_out
-            else:
-                # Full bottleneck: gated fusion of conv + oscillator paths
-                g = self.gate(torch.cat([conv_out.float(), ham_out], 1))
-                out = conv_out.float() * g + ham_out * (1 - g)
+                if self.ablation == 'B':
+                    out = ham_out
+                else:
+                    g = self.gate(torch.cat([conv_out.float(), ham_out], 1))
+                    out = conv_out.float() * g + ham_out * (1 - g)
 
-        out = self.drop(out.to(x.dtype))  # FIX 3: dropout
+        out = self.drop(out.to(x.dtype))
         mom = mom.to(x.dtype)
-        # FIX 4: Learned channel attention for energy
+        # Energy attention: SE-weighted (default) or plain channel-mean
+        # (HamVision-Lite, lite_no_se=True, round-3 Q4).
         energy_f = energy_raw.to(x.dtype)
-        ch_weights = self.energy_attn(energy_f).unsqueeze(-1).unsqueeze(-1)
-        energy_map = (energy_f * ch_weights).mean(dim=1, keepdim=True)
+        if self.energy_attn is None:
+            energy_map = energy_f.mean(dim=1, keepdim=True)
+        else:
+            ch_weights = self.energy_attn(energy_f).unsqueeze(-1).unsqueeze(-1)
+            energy_map = (energy_f * ch_weights).mean(dim=1, keepdim=True)
         return out, mom, energy_map
 
 
@@ -689,7 +724,10 @@ class HamSeg(nn.Module):
         depths = args.depths
         dc = args.damping_clamp
         # Round-2 ablation flag: 'none' | 'A' | 'B'
+        # Round-3 extension: 'C' (bandpass filterbank) plus HamVision-Lite flags.
         self.ablation = getattr(args, 'ablation', 'none')
+        self.lite_no_se = bool(getattr(args, 'lite_no_se', False))
+        self.lite_no_psattn = bool(getattr(args, 'lite_no_psattn', False))
 
         self.stem = nn.Sequential(
             nn.Conv2d(3, C, 3, padding=1, bias=False), nn.BatchNorm2d(C), nn.GELU(),
@@ -705,12 +743,18 @@ class HamSeg(nn.Module):
         # Bottleneck: Hamiltonian SS2D here (28x28 = 784 tokens)
         drop_rate = getattr(args, 'drop_rate', 0.1)
         self.bottleneck = nn.ModuleList([
-            HamiltonianBottleneck(C*8, dc, drop_rate, ablation=self.ablation)
+            HamiltonianBottleneck(C*8, dc, drop_rate,
+                                  ablation=self.ablation,
+                                  lite_no_se=self.lite_no_se)
             for _ in range(depths[3])])
 
         self.up3 = PatchExpanding(C*8)
         self.skip3 = EnergyGatedSkip(C*4, C*4, use_momentum=True)  # FIX 2: momentum at d3
-        self.ps_attn = PhaseSpaceAttention(C*4)
+        # Round-3 Q4: phase-space attention at d3 is optional.
+        if not self.lite_no_psattn:
+            self.ps_attn = PhaseSpaceAttention(C*4)
+        else:
+            self.ps_attn = None
         self.dec3 = nn.Sequential(*[ConvNeXtBlock(C*4) for _ in range(depths[2])])
 
         self.up2 = PatchExpanding(C*4)
@@ -763,7 +807,9 @@ class HamSeg(nn.Module):
             mom3 = F.interpolate(momentum, d3.shape[2:], mode='bilinear', align_corners=False)
             mom3 = mom3[:, :d3.shape[1]]
             d3 = self.skip3(d3, e3, en3, mom3)       # energy + momentum
-            d3 = self.ps_attn(d3, mom3, en3)           # PS attention
+            # Phase-space attention is optional (HamVision-Lite, round-3 Q4).
+            if self.ps_attn is not None:
+                d3 = self.ps_attn(d3, mom3, en3)
             d3 = self.dec3(d3)
 
         d2 = self.up2(d3)
