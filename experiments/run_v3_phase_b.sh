@@ -37,6 +37,17 @@ fi
 
 SCRIPT="src/hamseg.py"
 SEEDS=(42 43 44)
+
+# ACDC is 4-class (bg + RV + Myo + LV); every other segmentation dataset
+# in this suite is binary. Force the correct value per dataset so results
+# are comparable with the paper's Table 5.
+num_classes_for () {
+    case "$1" in
+        acdc)      echo 4 ;;
+        *)         echo 1 ;;
+    esac
+}
+
 DATASETS=(acdc isic2018)
 
 mkdir -p "$OUTPUT_ROOT"
@@ -52,6 +63,7 @@ for DS in "${DATASETS[@]}"; do
             --dataset "$DS" \
             --data_root "$DATA_ROOT" \
             --ablation C \
+            --num_classes "$(num_classes_for "$DS")" \
             --seed "$SEED" \
             --output_dir "$OUTPUT_ROOT"
     done
@@ -66,6 +78,7 @@ for DS in "${DATASETS[@]}"; do
             --data_root "$DATA_ROOT" \
             --lite_no_se \
             --lite_no_psattn \
+            --num_classes "$(num_classes_for "$DS")" \
             --seed "$SEED" \
             --output_dir "${OUTPUT_ROOT}_lite"
     done
