@@ -251,3 +251,36 @@ added here once the manuscript is accepted.
 ## License
 
 Released under the MIT License (see `LICENSE`).
+
+
+---
+
+## Round-3 revision (V3): bandpass baseline and HamVision-Lite
+
+Two additional experiment tracks have been added on top of the V2
+codebase to answer reviewer questions Q1, Q2, and Q4.
+
+**Bandpass-filterbank baseline (Q1 + Q2).** A parameter-matched
+Gabor-style filterbank that produces a (q, p, energy) triplet using
+static learnable filters instead of the input-dependent Hamiltonian
+oscillator. Activate with `--ablation C` on `src/hamseg.py`. The
+filterbank implementation is `src/bandpass_baseline.py` (1,181,184
+params at D=384 versus 1,188,096 for HamiltonianSS2D, ratio 0.9942).
+
+**HamVision-Lite (Q4).** The full HamSeg architecture with two of the
+eight interacting components enumerated by the reviewer removed --- the
+squeeze-and-excitation attention on the channel-energy tensor
+(`--lite_no_se`) and the phase-space attention at decoder stage d3
+(`--lite_no_psattn`). The remaining six components (ConvNeXt residual
+path, oscillator dynamics, gated fusion, energy-gated skips, momentum
+injection at all three decoder stages, PSSP head) are load-bearing and
+preserved. The recipe is documented in `configs/hamseg-lite.yaml`.
+
+**Launchers.**
+
+- `experiments/run_v3_phase_b.sh` runs both experiment tracks (12
+  jobs: 3 seeds x 2 datasets x 2 variants).
+- `experiments/run_v3_lite_only.sh` runs only the 6 HamVision-Lite
+  jobs (if the bandpass sweep is already done).
+- `experiments/smoke_test_lite.py` verifies the Lite configuration
+  loads and forward-passes before committing to a full training run.

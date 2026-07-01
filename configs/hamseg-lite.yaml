@@ -1,0 +1,68 @@
+# HamVision-Lite recipe
+#
+# Answers reviewer Q4 (round 3): "Is there a simplified version of
+# HamVision that retains most of the observed performance gains?"
+#
+# HamVision-Lite is the full HamSeg architecture with two of the eight
+# interacting components enumerated by the reviewer removed:
+#
+#   (a) squeeze-and-excitation attention on the channel-energy tensor
+#       inside the Hamiltonian bottleneck  --> --lite_no_se
+#
+#   (b) phase-space attention at decoder stage d3
+#                                          --> --lite_no_psattn
+#
+# The six remaining components -- ConvNeXt residual path, Hamiltonian
+# oscillator dynamics, gated fusion, energy-gated skip connections,
+# momentum injection at all three decoder stages, and (for classifier
+# runs) the PSSP head -- are all load-bearing per V2 ablations and are
+# preserved in HamVision-Lite.
+#
+# Parameter cost: ~74k parameters saved at D=384 (2.55% of the
+# bottleneck). The framing in the paper is "8 interacting mechanisms
+# reduced to 6", NOT "smaller model" -- the reviewer explicitly asks
+# for conceptual simplification rather than compute reduction.
+#
+# Usage (identical training recipe to the full model in V2 Table 2):
+#
+#   python src/hamseg.py \
+#       --dataset acdc \
+#       --data_root /path/to/data \
+#       --lite_no_se \
+#       --lite_no_psattn \
+#       --seed 42 \
+#       --output_dir outputs_v3_lite
+
+model:
+  name: HamSeg-Lite
+  base_dim: 96
+  stages: [3, 3, 9, 3]      # ConvNeXt-Tiny stage depths (encoder)
+
+  bottleneck:
+    dim: 384
+    hamiltonian_ss2d: true
+    convnext_residual: true
+    gated_fusion: true
+    squeeze_excitation_on_energy: false   # DROPPED (Lite)
+    dropout: 0.10
+
+  decoder:
+    momentum_injection_stages: [d1, d2, d3]   # kept: +5.59 pp on ACDC
+    energy_gated_skips: true                   # kept: load-bearing
+    phase_space_attention_d3: false            # DROPPED (Lite)
+
+training:
+  epochs: 200
+  batch_size: 8
+  optimizer: adamw
+  lr: 1.0e-4
+  weight_decay: 1.0e-4
+  scheduler: cosine
+  amp: true
+  augmentation:
+    - random_horizontal_flip
+    - random_rotation_15deg
+    - random_crop_resize
+
+seeds: [42, 43, 44]
+datasets: [acdc, isic2018]
